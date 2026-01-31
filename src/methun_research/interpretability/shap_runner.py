@@ -36,20 +36,54 @@ def build_model_from_ckpt(ckpt, device):
     return model
 
 
-def prepare_eval_matrix(data_path: str, label_col: str, feature_cols: list, preprocessor=None):
+def prepare_eval_matrix(
+    data_path: str,
+    label_col: str,
+    feature_cols: list,
+    preprocessor=None,
+    sample_size: int | None = None,
+    random_state: int = 42,
+    chunksize: int = 50_000,
+):
     usecols = list(dict.fromkeys(feature_cols + [label_col]))
-    df = pd.read_csv(data_path, usecols=usecols)
-    df["binary_label"] = (df[label_col] != "BENIGN").astype(int)
-    X = df[feature_cols].copy()
-    for col in X.select_dtypes(include=["object"]).columns:
-        X[col] = pd.to_numeric(X[col], errors="coerce")
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(X.median())
+    rng = np.random.RandomState(random_state)
+    reservoir_X: list[np.ndarray] = []
+    reservoir_y: list[int] = []
+    total_rows = 0
+    for chunk in pd.read_csv(data_path, usecols=usecols, chunksize=chunksize):
+        chunk["binary_label"] = (chunk[label_col] != "BENIGN").astype(int)
+        X_chunk = chunk[feature_cols].copy()
+        for col in X_chunk.select_dtypes(include=["object"]).columns:
+            X_chunk[col] = pd.to_numeric(X_chunk[col], errors="coerce")
+        X_chunk = X_chunk.replace([np.inf, -np.inf], np.nan).fillna(X_chunk.median())
+        X_vals = X_chunk.to_numpy(dtype=np.float32, copy=False)
+        y_vals = chunk["binary_label"].to_numpy()
+        for row, label in zip(X_vals, y_vals, strict=False):
+            if sample_size is None or len(reservoir_X) < sample_size:
+                reservoir_X.append(row.copy())
+                reservoir_y.append(int(label))
+            else:
+                swap_idx = rng.randint(0, total_rows + 1)
+                if swap_idx < sample_size:
+                    reservoir_X[swap_idx] = row.copy()
+                    reservoir_y[swap_idx] = int(label)
+            total_rows += 1
+    if not reservoir_X:
+        return np.empty((0, len(feature_cols))), np.empty(0, dtype=int), total_rows
+    X_array = np.stack(reservoir_X).astype(np.float32, copy=False)
+    y_array = np.array(reservoir_y, dtype=int)
+    perm = rng.permutation(len(y_array))
+    X_array = X_array[perm]
+    y_array = y_array[perm]
     if preprocessor is not None:
-        return preprocessor.transform(X), df["binary_label"].values
-    from sklearn.preprocessing import QuantileTransformer
+        X_df = pd.DataFrame(X_array, columns=feature_cols)
+        X_proc = preprocessor.transform(X_df)
+    else:
+        from sklearn.preprocessing import QuantileTransformer
 
-    qt = QuantileTransformer(output_distribution="uniform", random_state=42)
-    return qt.fit_transform(X), df["binary_label"].values
+        qt = QuantileTransformer(output_distribution="uniform", random_state=random_state)
+        X_proc = qt.fit_transform(X_array)
+    return X_proc, y_array, total_rows
 
 
 def run_shap(
@@ -67,11 +101,37 @@ def run_shap(
     ckpt = load_checkpoint(checkpoint_path)
     model = build_model_from_ckpt(ckpt, device)
     preprocessor = ckpt.get("preprocessor")
+    saved_feature_cols = ckpt.get("feature_columns") or []
     df_head = pd.read_csv(data_path, nrows=5)
     label_col = detect_label_column(df_head)
-    exclude_cols = [label_col, "binary_label", "Flow ID", "Source IP", "Destination IP", "Timestamp"]
-    feature_cols = [col for col in df_head.columns if col not in exclude_cols]
-    X_all, y_all = prepare_eval_matrix(data_path, label_col, feature_cols, preprocessor)
+    if saved_feature_cols:
+        missing = [col for col in saved_feature_cols if col not in df_head.columns]
+        if missing:
+            raise ValueError(
+                "Saved feature columns missing in provided data: " + ", ".join(missing)
+            )
+        feature_cols = list(saved_feature_cols)
+    else:
+        exclude_cols = [
+            label_col,
+            "binary_label",
+            "Flow ID",
+            "Source IP",
+            "Destination IP",
+            "Timestamp",
+        ]
+        feature_cols = [col for col in df_head.columns if col not in exclude_cols]
+    sample_cap = max(eval_pool, background_size, eval_size)
+    X_all, y_all, total_rows = prepare_eval_matrix(
+        data_path,
+        label_col,
+        feature_cols,
+        preprocessor,
+        sample_size=sample_cap,
+        random_state=random_seed,
+    )
+    if len(y_all) == 0:
+        raise RuntimeError("No rows sampled from the provided dataset; verify data path and columns.")
     pool_n = min(eval_pool, len(y_all))
     rng = np.random.RandomState(random_seed)
     pool_idx = rng.choice(len(y_all), size=pool_n, replace=False)
@@ -98,12 +158,26 @@ def run_shap(
     start = 0
     while start < eval_tensor.shape[0]:
         end = min(start + chunk_size, eval_tensor.shape[0])
-        shap_values.append(
-            explainer.shap_values(eval_tensor[start:end], check_additivity=False)[1]
-        )
+        raw_sv = explainer.shap_values(eval_tensor[start:end], check_additivity=False)
+        if isinstance(raw_sv, (list, tuple)):
+            class_sv = raw_sv[1]
+            if start == 0:
+                shapes = ", ".join(str(arr.shape) for arr in raw_sv)
+                print(f"SHAP list shapes: {shapes}")
+        elif isinstance(raw_sv, np.ndarray) and raw_sv.ndim == 3:
+            # raw shape: (batch, features, classes)
+            class_sv = raw_sv[:, :, 1]
+            if start == 0:
+                print(f"SHAP ndarray shape: {raw_sv.shape}")
+        else:
+            raise ValueError(f"Unsupported SHAP output shape: {getattr(raw_sv, 'shape', 'unknown')}")
+        shap_values.append(class_sv)
         start = end
     sv = np.concatenate(shap_values, axis=0)
     mean_abs = np.abs(sv).mean(axis=0)
+    print(
+        f"Sampled {len(y_all)} rows (of ~{total_rows}) for SHAP | eval batches: {sv.shape[0]} x {sv.shape[1]}"
+    )
     importance = pd.DataFrame({"feature": feature_cols, "mean_abs_shap": mean_abs})
     importance = importance.sort_values("mean_abs_shap", ascending=False)
     csv_path = os.path.join(output_dir, "shap_global_importance_attack.csv")

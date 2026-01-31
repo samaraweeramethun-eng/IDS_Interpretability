@@ -27,8 +27,12 @@ python -m venv .venv
 
 # 3) Install dependencies
 pip install --upgrade pip
-pip install -e .
+pip install -r requirements.txt
+# (Optional) install the package in editable mode if you plan to import it elsewhere
+# pip install -e .
 ```
+
+The `requirements.txt` file installs the project (through `-e .`) together with every dependency declared in `pyproject.toml`, so sharing that single file is enough to recreate the environment on a fresh machine.
 
 ## 3. Data Preparation
 
@@ -65,6 +69,25 @@ Key differences vs. the hybrid:
 - Stochastic Weight Averaging (SWA)
 
 Adjust hyperparameters inside `EnhancedConfig` before launching jobs.
+
+### 4.3 One-Command Pipeline (Train ➜ Test ➜ SHAP)
+
+Prefer to train, evaluate on a held-out test split, and immediately run SHAP without juggling multiple commands? Use the pipeline helper:
+
+```bash
+python scripts/run_pipeline.py \
+  --epochs 5 \
+  --background 400 --eval 400 --pool 5000 \
+  --chunk 128 --topk 15
+```
+
+What happens when you launch this command:
+
+- **Train/Val/Test split** – `EnhancedConfig` now exposes `val_size` (default 0.1) and `test_size` (default 0.2). The pipeline first stratifies CICIDS2017 into train/val/test, balances only the training fold, then reports validation metrics each epoch and prints a final `Test Loss … | Test AUC …` line for the untouched test set.
+- **Training overrides** – Pass any of the familiar knobs (`--epochs`, `--batch-size`, `--val-batch-size`, `--lr`, `--undersample`, `--num-workers`, `--seed`) to customize the Enhanced Transformer run without editing code.
+- **SHAP controls** – Flags (`--background`, `--eval`, `--pool`, `--chunk`, `--topk`) mirror `scripts/run_shap.py`. The SHAP runner streams the dataset, so modest values (e.g., 400/400/5000) work on CPU-only machines; scale them up on beefier hardware.
+- **Artifacts** – Checkpoints land in `--output` (default `artifacts/`); SHAP exports (`shap_global_importance_attack.csv`, `shap_summary_attack.png`, `shap_waterfall_attack.png`, plus logs) are written to `<output>/shap/` unless `--shap-dir` is provided.
+- **Checkpoint reuse** – To skip retraining, add `--skip-training --checkpoint artifacts/enhanced_binary_rtids_model.pth`; the script will jump straight to SHAP using your existing model.
 
 ## 5. Interpretability with SHAP
 

@@ -20,6 +20,7 @@ class EnhancedConfig:
     focal_alpha: float = 0.75
     use_class_weights: bool = True
     label_smoothing: float = 0.1
+    val_size: float = 0.1
     test_size: float = 0.2
     random_state: int = 42
     use_robust_scaling: bool = True

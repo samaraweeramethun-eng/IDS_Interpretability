@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.nn.parallel import DataParallel
+from torch.utils.data import DataLoader, TensorDataset
 
 from methun_research.config import EnhancedConfig
 from methun_research.data import (
@@ -114,21 +115,55 @@ def train_enhanced(config: EnhancedConfig | None = None):
     df = pd.read_csv(config.input_path)
     label_col = detect_label_column(df)
     X_raw, y, feature_cols = prepare_features(df, label_col)
-    X_train_raw, X_val_raw, y_train, y_val = stratified_split(
-        X_raw.values,
-        y,
-        test_size=config.test_size,
-        random_state=config.random_state,
-    )
-    X_train_raw = pd.DataFrame(X_train_raw, columns=feature_cols)
-    X_val_raw = pd.DataFrame(X_val_raw, columns=feature_cols)
+    val_ratio = getattr(config, "val_size", 0.1)
+    test_ratio = config.test_size
+    if val_ratio < 0 or test_ratio < 0:
+        raise ValueError("val_size and test_size must be non-negative")
+    holdout_ratio = val_ratio + test_ratio
+    if holdout_ratio >= 1.0:
+        raise ValueError("val_size + test_size must be < 1.0")
+    feature_count = X_raw.shape[1]
+    X_values = X_raw.values
+    if holdout_ratio > 0:
+        X_train_raw, X_holdout, y_train, y_holdout = stratified_split(
+            X_values,
+            y,
+            test_size=holdout_ratio,
+            random_state=config.random_state,
+        )
+    else:
+        X_train_raw, y_train = X_values, y
+        X_holdout = np.empty((0, feature_count))
+        y_holdout = np.empty(0, dtype=y.dtype)
+    if val_ratio > 0 and test_ratio > 0 and len(y_holdout) > 0:
+        test_fraction = test_ratio / holdout_ratio
+        X_val_raw, X_test_raw, y_val, y_test = stratified_split(
+            X_holdout,
+            y_holdout,
+            test_size=test_fraction,
+            random_state=config.random_state,
+        )
+    elif val_ratio > 0:
+        X_val_raw, y_val = X_holdout, y_holdout
+        X_test_raw = np.empty((0, feature_count))
+        y_test = np.empty(0, dtype=y_holdout.dtype)
+    else:
+        X_test_raw, y_test = X_holdout, y_holdout
+        X_val_raw = np.empty((0, feature_count))
+        y_val = np.empty(0, dtype=y_holdout.dtype)
+    def _to_frame(array: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(array, columns=feature_cols) if array.size else pd.DataFrame(columns=feature_cols)
+    X_train_raw = _to_frame(X_train_raw)
+    X_val_raw = _to_frame(X_val_raw)
+    X_test_raw = _to_frame(X_test_raw)
     preprocessor = RobustPreprocessor(
         scaling="quantile" if config.use_robust_scaling else "standard",
         handle_outliers=True,
         n_features=120,
     )
     X_train = preprocessor.fit_transform(X_train_raw, y_train)
-    X_val = preprocessor.transform(X_val_raw)
+    X_val = preprocessor.transform(X_val_raw) if len(X_val_raw) else np.empty((0, X_train.shape[1]))
+    X_test = preprocessor.transform(X_test_raw) if len(X_test_raw) else np.empty((0, X_train.shape[1]))
     balancer = IntelligentDataBalancer(config.undersampling_ratio, config.random_state)
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
     train_loader, val_loader, _ = build_dataloaders(
@@ -140,6 +175,16 @@ def train_enhanced(config: EnhancedConfig | None = None):
         val_batch_size=config.val_batch_size,
         num_workers=config.num_workers,
     )
+    test_loader = None
+    if len(y_test) > 0:
+        test_dataset = TensorDataset(torch.FloatTensor(X_test), torch.LongTensor(y_test))
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config.val_batch_size,
+            shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=True,
+        )
     class_counts = np.bincount(y_train_bal)
     total = len(y_train_bal)
     class_weights = torch.FloatTensor([
@@ -192,6 +237,16 @@ def train_enhanced(config: EnhancedConfig | None = None):
     if best_state is None:
         print("Training did not improve over initialization.")
         return None
+    if test_loader is not None and len(test_loader.dataset) > 0:
+        target_model = model.module if isinstance(model, DataParallel) else model
+        target_model.load_state_dict(best_state["model_state_dict"])
+        test_loss, test_metrics = _eval_epoch(model, test_loader, criterion, device)
+        print(
+            f"Test Loss {test_loss:.4f} | Test AUC {test_metrics['auc_roc']:.4f} | Test F1 {test_metrics['f1_score']:.4f}"
+        )
+        best_state["test_metrics"] = test_metrics
+    else:
+        print("No held-out test set configured; skipping test evaluation.")
     model_path = os.path.join(config.output_dir, "enhanced_binary_rtids_model.pth")
     torch.save(best_state, model_path)
     print(f"Saved best enhanced model -> {model_path}")
