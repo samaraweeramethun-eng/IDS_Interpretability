@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from methun_research.models.transformer import EnhancedBinaryTransformerClassifier
+from methun_research.models.cnn_transformer import CNNTransformerIDS
 from methun_research.utils.device import setup_device
 from methun_research.data import detect_label_column
 
@@ -19,9 +20,7 @@ def load_checkpoint(checkpoint_path: str):
         return torch.load(checkpoint_path, map_location="cpu")
 
 
-def build_model_from_ckpt(ckpt, device):
-    state = ckpt["model_state_dict"]
-    cfg = ckpt.get("config", {})
+def _build_enhanced_model(state, cfg, device):
     input_dim = state["feature_embedder.projection.weight"].shape[1]
     model = EnhancedBinaryTransformerClassifier(
         input_dim=input_dim,
@@ -31,9 +30,64 @@ def build_model_from_ckpt(ckpt, device):
         d_ff=cfg.get("d_ff", 640),
         dropout=cfg.get("dropout", 0.15),
     ).to(device)
+    return model
+
+
+def _build_cnn_model(state, cfg, device):
+    positional_shape = state.get("positional")
+    if positional_shape is None:
+        raise KeyError("CNN checkpoint missing positional embeddings; cannot infer input dimension")
+    input_dim = positional_shape.shape[1] - 1
+    model = CNNTransformerIDS(
+        input_dim=input_dim,
+        d_model=cfg.get("d_model", 192),
+        conv_channels=cfg.get("conv_channels", 96),
+        num_layers=cfg.get("num_layers", 3),
+        num_heads=cfg.get("num_heads", 8),
+        d_ff=cfg.get("d_ff", 768),
+        dropout=cfg.get("dropout", 0.2),
+    ).to(device)
+    return model
+
+
+def build_model_from_ckpt(ckpt, device):
+    state = ckpt["model_state_dict"]
+    cfg = ckpt.get("config", {})
+    model_type = ckpt.get("model_type", "enhanced_transformer")
+    if model_type == "cnn_transformer":
+        model = _build_cnn_model(state, cfg, device)
+    else:
+        model = _build_enhanced_model(state, cfg, device)
     model.load_state_dict(state, strict=True)
     model.eval()
-    return model
+    return model, model_type
+
+
+class StandardScalerPreprocessor:
+    def __init__(self, state: dict, feature_cols: list[str]):
+        self.feature_cols = feature_cols
+        medians = state.get("medians", {})
+        self.fill_values = {col: medians.get(col, 0.0) for col in feature_cols}
+        self.mean = np.array(state.get("mean", []), dtype=np.float32)
+        self.scale = np.array(state.get("scale", []), dtype=np.float32)
+
+    def transform(self, df: pd.DataFrame) -> np.ndarray:
+        filled = df.fillna(self.fill_values)
+        arr = filled.to_numpy(dtype=np.float32, copy=False)
+        if self.mean.size != arr.shape[1] or self.scale.size != arr.shape[1]:
+            return arr
+        denom = np.where(self.scale == 0, 1.0, self.scale)
+        return (arr - self.mean) / denom
+
+
+def resolve_preprocessor(state, feature_cols):
+    if state is None:
+        return None
+    if hasattr(state, "transform"):
+        return state
+    if isinstance(state, dict) and state.get("type") == "standard_scaler":
+        return StandardScalerPreprocessor(state, feature_cols)
+    return None
 
 
 def prepare_eval_matrix(
@@ -99,8 +153,7 @@ def run_shap(
 ):
     device, _ = setup_device()
     ckpt = load_checkpoint(checkpoint_path)
-    model = build_model_from_ckpt(ckpt, device)
-    preprocessor = ckpt.get("preprocessor")
+    model, model_type = build_model_from_ckpt(ckpt, device)
     saved_feature_cols = ckpt.get("feature_columns") or []
     df_head = pd.read_csv(data_path, nrows=5)
     label_col = detect_label_column(df_head)
@@ -121,6 +174,8 @@ def run_shap(
             "Timestamp",
         ]
         feature_cols = [col for col in df_head.columns if col not in exclude_cols]
+    preprocessor_state = ckpt.get("preprocessor")
+    preprocessor = resolve_preprocessor(preprocessor_state, feature_cols)
     sample_cap = max(eval_pool, background_size, eval_size)
     X_all, y_all, total_rows = prepare_eval_matrix(
         data_path,

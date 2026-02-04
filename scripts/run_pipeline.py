@@ -2,14 +2,20 @@ import argparse
 import os
 from pathlib import Path
 
-from methun_research.config import EnhancedConfig
-from methun_research.training import train_enhanced
+from methun_research.config import CNNTransformerConfig, EnhancedConfig
+from methun_research.training import train_cnn_transformer, train_enhanced
 from methun_research.interpretability import run_shap
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the enhanced transformer and immediately run SHAP interpretability."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["cnn", "enhanced"],
+        default="cnn",
+        help="Model to train before running SHAP (default: cnn).",
     )
     parser.add_argument("--data", default="data/cicids2017/cicids2017.csv", help="Path to CICIDS2017 CSV")
     parser.add_argument("--output", default="artifacts", help="Directory for checkpoints and logs")
@@ -35,8 +41,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_config(args: argparse.Namespace) -> EnhancedConfig:
-    config = EnhancedConfig()
+def build_config(args: argparse.Namespace) -> EnhancedConfig | CNNTransformerConfig:
+    if args.model == "cnn":
+        config: EnhancedConfig | CNNTransformerConfig = CNNTransformerConfig()
+    else:
+        config = EnhancedConfig()
     config.input_path = args.data
     config.output_dir = args.output
     config.epochs = args.epochs
@@ -56,6 +65,7 @@ def main() -> None:
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
     config = build_config(args)
+    trainer = train_cnn_transformer if args.model == "cnn" else train_enhanced
 
     checkpoint_path = args.checkpoint
     if args.skip_training:
@@ -65,8 +75,8 @@ def main() -> None:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         print(f"Skipping training; using checkpoint: {checkpoint_path}")
     else:
-        print("Starting training phase...")
-        checkpoint_path = train_enhanced(config)
+        print(f"Starting {args.model.upper()} training phase...")
+        checkpoint_path = trainer(config)
         if checkpoint_path is None:
             raise RuntimeError("Training did not produce a checkpoint; aborting SHAP phase")
         print(f"Training complete -> {checkpoint_path}")

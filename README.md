@@ -114,7 +114,59 @@ pyproject.toml            # Python dependency spec
 methun-research.ipynb     # Scratchpad for dataset exploration
 ```
 
-## 7. Next Steps
+## 7. Running on Google Colab
+
+Need GPU acceleration or a clean slate? Follow these steps to reproduce the full training + SHAP pipeline inside [Google Colab](https://colab.research.google.com/):
+
+1. **Create a GPU runtime** - `Runtime > Change runtime type > GPU`. (High-RAM runtimes reduce pandas/SHAP memory pressure.)
+2. **Clone the repo & install dependencies** in the first cell:
+
+  ```bash
+  !git clone https://github.com/<your-org>/methun-research.git
+  %cd methun-research
+  !pip install -U pip
+  !pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+  !pip install -r requirements.txt
+  ```
+
+  > The extra `pip install torch ... --index-url ...` grabs the latest CUDA wheel that matches Colab's GPU drivers; the subsequent `requirements.txt` install reuses that wheel.
+
+3. **Make the CICIDS2017 CSV available**. Two common options:
+
+  - *Mount Google Drive* (recommended for the full dataset):
+
+    ```python
+    from google.colab import drive
+    drive.mount('/content/drive', force_remount=True)
+    !mkdir -p data/cicids2017
+    !ln -s /content/drive/MyDrive/cicids2017/cicids2017.csv data/cicids2017/cicids2017.csv
+    ```
+
+  - *Upload a quick sample* (good for smoke tests):
+
+    ```python
+    from google.colab import files
+    uploaded = files.upload()
+    uploaded_name = next(iter(uploaded))
+    !mkdir -p data/cicids2017
+    !mv "$uploaded_name" data/cicids2017/cicids2017.csv
+    ```
+
+4. **Run the pipeline** (artifacts are saved locally unless you point `--output` at Drive):
+
+  ```bash
+  !python scripts/run_pipeline.py \
+     --model cnn \
+     --epochs 10 \
+     --batch-size 512 --val-batch-size 1024 \
+     --chunk 128 --background 800 --eval 800 --pool 6000 \
+     --output /content/drive/MyDrive/methun_artifacts
+  ```
+
+  - Lower the SHAP knobs (`--chunk`, `--background`, `--eval`, `--pool`) if you hit RAM limits.
+  - `build_dataloaders()` now auto-disables `pin_memory` when CUDA isn't available, so CPU-only Colab runtimes also work out of the box.
+
+## 8. Next Steps
 
 - Add argparse overrides to the training scripts for ad-hoc sweeps
 - Integrate Weights & Biases or MLflow tracking

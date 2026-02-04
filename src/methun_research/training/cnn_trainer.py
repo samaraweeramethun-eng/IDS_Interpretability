@@ -39,8 +39,14 @@ def _prepare_scaled_data(X: pd.DataFrame, y: np.ndarray, config: CNNTransformerC
         random_state=config.random_state,
     )
     train_medians = X_train_raw.median()
-    X_train_raw = X_train_raw.fillna(train_medians)
-    X_val_raw = X_val_raw.fillna(train_medians)
+    X_train_raw = (
+        X_train_raw.replace([np.inf, -np.inf], np.nan)
+        .fillna(train_medians)
+    )
+    X_val_raw = (
+        X_val_raw.replace([np.inf, -np.inf], np.nan)
+        .fillna(train_medians)
+    )
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train_raw)
     X_val = scaler.transform(X_val_raw)
@@ -95,7 +101,7 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         config.batch_size = 512
         config.val_batch_size = 1024
     print("Loading dataset for CNN-Transformer training...")
-    df = pd.read_csv(config.input_path)
+    df = pd.read_csv(config.input_path, engine="python")
     label_col = detect_label_column(df)
     X, y, feature_cols = prepare_features(df, label_col)
     X_train, X_val, y_train, y_val, scaler, medians = _prepare_scaled_data(X, y, config)
@@ -145,12 +151,20 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         if metrics["auc_roc"] > best_auc:
             best_auc = metrics["auc_roc"]
             state_dict = model.module.state_dict() if isinstance(model, DataParallel) else model.state_dict()
+            preprocess_state = {
+                "type": "standard_scaler",
+                "medians": medians.to_dict(),
+                "mean": scaler.mean_.tolist(),
+                "scale": scaler.scale_.tolist(),
+            }
             best_state = {
                 "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "metrics": metrics,
                 "config": config.__dict__,
                 "feature_columns": feature_cols,
+                "preprocessor": preprocess_state,
+                "model_type": "cnn_transformer",
             }
     if best_state is None:
         print("Training failed to improve beyond initialization.")

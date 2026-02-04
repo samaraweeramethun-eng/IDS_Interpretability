@@ -233,6 +233,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
                 "metrics": metrics,
                 "config": config.__dict__,
                 "feature_columns": feature_cols,
+                "model_type": "enhanced_transformer",
             }
     if best_state is None:
         print("Training did not improve over initialization.")

@@ -135,7 +135,10 @@ def build_dataloaders(
     batch_size: int,
     val_batch_size: int,
     num_workers: int,
+    pin_memory: bool | None = None,
 ):
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
     train_dataset = TensorDataset(torch.FloatTensor(X_train), torch.LongTensor(y_train))
     val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.LongTensor(y_val))
     class_counts = np.bincount(y_train)
@@ -151,7 +154,7 @@ def build_dataloaders(
         batch_size=batch_size,
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -159,7 +162,7 @@ def build_dataloaders(
         batch_size=val_batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     return train_loader, val_loader, val_dataset
 
