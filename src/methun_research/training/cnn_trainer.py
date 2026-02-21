@@ -32,28 +32,22 @@ def _set_seeds(seed: int):
     random.seed(seed)
 
 
-def _prepare_scaled_data(X: pd.DataFrame, y: np.ndarray, config: CNNTransformerConfig):
+def _prepare_scaled_data(X_np: np.ndarray, y: np.ndarray, config: CNNTransformerConfig):
+    """Split, scale, return float32 arrays. X_np must already be clean float32."""
     X_train_raw, X_val_raw, y_train, y_val = train_test_split(
-        X,
+        X_np,
         y,
         test_size=config.test_size,
         stratify=y,
         random_state=config.random_state,
     )
-    train_medians = X_train_raw.median()
-    X_train_raw = (
-        X_train_raw.replace([np.inf, -np.inf], np.nan)
-        .fillna(train_medians)
-    )
-    X_val_raw = (
-        X_val_raw.replace([np.inf, -np.inf], np.nan)
-        .fillna(train_medians)
-    )
+    # Compute column medians for the preprocessing artifact (needed at inference)
+    train_medians = pd.Series(np.nanmedian(X_train_raw, axis=0))
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train_raw).astype(np.float32)
+    del X_train_raw; gc.collect()
     X_val = scaler.transform(X_val_raw).astype(np.float32)
-    del X_train_raw, X_val_raw
-    gc.collect()
+    del X_val_raw; gc.collect()
     return X_train, X_val, y_train, y_val, scaler, train_medians
 
 
@@ -105,7 +99,7 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         config.batch_size = 512
         config.val_batch_size = 1024
     print("Loading dataset for CNN-Transformer training...")
-    df = pd.read_csv(config.input_path, engine="python")
+    df = pd.read_csv(config.input_path, low_memory=False)
     label_col = detect_label_column(df)
     X, y, feature_cols = prepare_features(df, label_col)
     del df; gc.collect()  # free ~1.7 GB
@@ -115,6 +109,8 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
     input_dim = X_train.shape[1]
     del X_train, y_train; gc.collect()  # free pre-balance arrays
+    # num_workers=0 avoids forked subprocesses that duplicate memory on Colab
+    n_workers = 0 if torch.cuda.is_available() else config.num_workers
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -122,7 +118,7 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         y_val,
         batch_size=config.batch_size,
         val_batch_size=config.val_batch_size,
-        num_workers=config.num_workers,
+        num_workers=n_workers,
     )
     del X_train_bal, y_train_bal; gc.collect()  # now in TensorDataset
     model = CNNTransformerIDS(

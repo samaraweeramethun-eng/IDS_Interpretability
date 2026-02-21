@@ -114,10 +114,10 @@ def train_enhanced(config: EnhancedConfig | None = None):
         config.batch_size = 1024
         config.val_batch_size = 2048
     print("Loading dataset...")
-    df = pd.read_csv(config.input_path)
+    df = pd.read_csv(config.input_path, low_memory=False)
     label_col = detect_label_column(df)
-    X_raw, y, feature_cols = prepare_features(df, label_col)
-    del df; gc.collect()  # free ~1.7 GB
+    X_np, y, feature_cols = prepare_features(df, label_col)
+    del df; gc.collect()  # free raw DataFrame
     val_ratio = getattr(config, "val_size", 0.1)
     test_ratio = config.test_size
     if val_ratio < 0 or test_ratio < 0:
@@ -125,20 +125,20 @@ def train_enhanced(config: EnhancedConfig | None = None):
     holdout_ratio = val_ratio + test_ratio
     if holdout_ratio >= 1.0:
         raise ValueError("val_size + test_size must be < 1.0")
-    feature_count = X_raw.shape[1]
-    X_values = X_raw.values
-    del X_raw; gc.collect()
+    feature_count = X_np.shape[1]
     if holdout_ratio > 0:
         X_train_raw, X_holdout, y_train, y_holdout = stratified_split(
-            X_values,
+            X_np,
             y,
             test_size=holdout_ratio,
             random_state=config.random_state,
         )
+        del X_np, y; gc.collect()
     else:
-        X_train_raw, y_train = X_values, y
-        X_holdout = np.empty((0, feature_count))
-        y_holdout = np.empty(0, dtype=y.dtype)
+        X_train_raw, y_train = X_np, y
+        del X_np, y; gc.collect()
+        X_holdout = np.empty((0, feature_count), dtype=np.float32)
+        y_holdout = np.empty(0, dtype=np.int8)
     if val_ratio > 0 and test_ratio > 0 and len(y_holdout) > 0:
         test_fraction = test_ratio / holdout_ratio
         X_val_raw, X_test_raw, y_val, y_test = stratified_split(
@@ -149,18 +149,14 @@ def train_enhanced(config: EnhancedConfig | None = None):
         )
     elif val_ratio > 0:
         X_val_raw, y_val = X_holdout, y_holdout
-        X_test_raw = np.empty((0, feature_count))
-        y_test = np.empty(0, dtype=y_holdout.dtype)
+        X_test_raw = np.empty((0, feature_count), dtype=np.float32)
+        y_test = np.empty(0, dtype=np.int8)
     else:
         X_test_raw, y_test = X_holdout, y_holdout
-        X_val_raw = np.empty((0, feature_count))
-        y_val = np.empty(0, dtype=y_holdout.dtype)
-    del X_holdout, y_holdout, X_values, y; gc.collect()
-    def _to_frame(array: np.ndarray) -> pd.DataFrame:
-        return pd.DataFrame(array, columns=feature_cols) if array.size else pd.DataFrame(columns=feature_cols)
-    X_train_raw = _to_frame(X_train_raw)
-    X_val_raw = _to_frame(X_val_raw)
-    X_test_raw = _to_frame(X_test_raw)
+        X_val_raw = np.empty((0, feature_count), dtype=np.float32)
+        y_val = np.empty(0, dtype=np.int8)
+    del X_holdout, y_holdout; gc.collect()
+    # Preprocessor now accepts numpy arrays directly (no DataFrame conversion)
     preprocessor = RobustPreprocessor(
         scaling="quantile" if config.use_robust_scaling else "standard",
         handle_outliers=True,
@@ -174,6 +170,8 @@ def train_enhanced(config: EnhancedConfig | None = None):
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
     input_dim = X_train.shape[1]
     del X_train, y_train; gc.collect()
+    # num_workers=0 avoids forked subprocesses that duplicate memory on Colab
+    n_workers = 0 if torch.cuda.is_available() else config.num_workers
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -181,7 +179,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
         y_val,
         batch_size=config.batch_size,
         val_batch_size=config.val_batch_size,
-        num_workers=config.num_workers,
+        num_workers=n_workers,
     )
     test_loader = None
     if len(y_test) > 0:
@@ -190,7 +188,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
             test_dataset,
             batch_size=config.val_batch_size,
             shuffle=False,
-            num_workers=config.num_workers,
+            num_workers=n_workers,
             pin_memory=True,
         )
     del X_train_bal, X_val, y_val, X_test, y_test; gc.collect()

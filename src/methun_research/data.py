@@ -26,15 +26,23 @@ class IntelligentDataBalancer:
         )
         if len(majority_idx) > target_majority:
             minority_center = X[minority_idx].mean(axis=0)
-            distances = np.linalg.norm(X[majority_idx] - minority_center, axis=1)
-            weights = 1 / (distances + 1e-8)
-            weights /= weights.sum()
+            # Compute distances in chunks to avoid a massive temp array
+            CHUNK = 100_000
+            distances = np.empty(len(majority_idx), dtype=np.float32)
+            for start in range(0, len(majority_idx), CHUNK):
+                end = min(start + CHUNK, len(majority_idx))
+                diff = X[majority_idx[start:end]] - minority_center
+                distances[start:end] = np.linalg.norm(diff, axis=1).astype(np.float32)
+                del diff
+            weights = 1.0 / (distances.astype(np.float64) + 1e-8)
+            weights /= weights.sum()  # float64 ensures sum == 1.0
             selected_majority = self._rng.choice(
                 majority_idx,
                 size=target_majority,
                 replace=False,
-                p=weights
+                p=weights,
             )
+            del distances, weights
         else:
             selected_majority = majority_idx
         combined_idx = np.concatenate([selected_majority, minority_idx])
@@ -59,44 +67,49 @@ class RobustPreprocessor:
             capped[col] = capped[col].clip(low, high)
         return capped
 
-    def fit_transform(self, X: pd.DataFrame, y: np.ndarray) -> np.ndarray:
-        X_proc = X.replace([np.inf, -np.inf], np.nan)
-        for col in X_proc.columns:
-            if X_proc[col].isna().any():
-                X_proc[col] = X_proc[col].fillna(X_proc[col].median())
+    def fit_transform(self, X, y: np.ndarray) -> np.ndarray:
+        # Accept either DataFrame or numpy array
+        if isinstance(X, pd.DataFrame):
+            X_np = X.values.astype(np.float32)
+        else:
+            X_np = np.asarray(X, dtype=np.float32)
+        # In-place clean
+        np.nan_to_num(X_np, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         if self.handle_outliers:
             bounds = []
-            for col in X_proc.columns:
-                q_low = X_proc[col].quantile(0.005)
-                q_high = X_proc[col].quantile(0.995)
+            for col_idx in range(X_np.shape[1]):
+                q_low = float(np.percentile(X_np[:, col_idx], 0.5))
+                q_high = float(np.percentile(X_np[:, col_idx], 99.5))
                 bounds.append((q_low, q_high))
+                np.clip(X_np[:, col_idx], q_low, q_high, out=X_np[:, col_idx])
             self.cap_bounds = bounds
-            X_proc = self._cap_frame(X_proc)
-        if y is not None and self.n_features < X_proc.shape[1]:
+        if y is not None and self.n_features < X_np.shape[1]:
             selector = SelectKBest(mutual_info_classif, k=self.n_features)
-            X_selected = selector.fit_transform(X_proc, y)
+            X_np = selector.fit_transform(X_np, y).astype(np.float32)
             self.feature_selector = selector
-            X_proc = pd.DataFrame(X_selected, index=X_proc.index)
         if self.scaling == "quantile":
             self.scaler = QuantileTransformer(output_distribution="uniform", random_state=42)
         elif self.scaling == "robust":
             self.scaler = RobustScaler()
         else:
             self.scaler = StandardScaler()
-        return self.scaler.fit_transform(X_proc).astype(np.float32)
+        return self.scaler.fit_transform(X_np).astype(np.float32)
 
-    def transform(self, X: pd.DataFrame) -> np.ndarray:
-        X_proc = X.replace([np.inf, -np.inf], np.nan)
-        for col in X_proc.columns:
-            if X_proc[col].isna().any():
-                X_proc[col] = X_proc[col].fillna(X_proc[col].median())
-        X_proc = self._cap_frame(X_proc)
+    def transform(self, X) -> np.ndarray:
+        if isinstance(X, pd.DataFrame):
+            X_np = X.values.astype(np.float32)
+        else:
+            X_np = np.asarray(X, dtype=np.float32)
+        np.nan_to_num(X_np, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.handle_outliers and self.cap_bounds is not None:
+            for col_idx in range(X_np.shape[1]):
+                low, high = self.cap_bounds[col_idx]
+                np.clip(X_np[:, col_idx], low, high, out=X_np[:, col_idx])
         if self.feature_selector is not None:
-            X_proc = self.feature_selector.transform(X_proc)
-            X_proc = pd.DataFrame(X_proc)
+            X_np = self.feature_selector.transform(X_np).astype(np.float32)
         if self.scaler is not None:
-            return self.scaler.transform(X_proc).astype(np.float32)
-        return X_proc.values.astype(np.float32)
+            return self.scaler.transform(X_np).astype(np.float32)
+        return X_np
 
 
 def detect_label_column(df: pd.DataFrame) -> str:
@@ -107,16 +120,22 @@ def detect_label_column(df: pd.DataFrame) -> str:
 
 
 def prepare_features(df: pd.DataFrame, label_col: str):
-    binary_label = (df[label_col] != "BENIGN").astype(int).values
+    """Extract features as a float32 numpy array to minimise memory."""
+    binary_label = (df[label_col] != "BENIGN").astype(np.int8).values
     blacklist = {label_col, "Flow ID", "Source IP", "Destination IP", "Timestamp"}
     feature_cols = [col for col in df.columns if col not in blacklist]
-    X = df[feature_cols].copy()
-    for col in X.select_dtypes(include=["object"]).columns:
-        X[col] = pd.to_numeric(X[col], errors="coerce")
-    # Downcast float64 -> float32 to halve memory (saves ~850 MB on full dataset)
-    for col in X.select_dtypes(include=["float64"]).columns:
-        X[col] = X[col].astype(np.float32)
-    return X, binary_label, feature_cols
+    X = df[feature_cols]
+    # Convert any non-numeric columns
+    obj_cols = X.select_dtypes(include=["object"]).columns
+    if len(obj_cols) > 0:
+        X = X.copy()  # only copy if we need to mutate
+        for col in obj_cols:
+            X[col] = pd.to_numeric(X[col], errors="coerce")
+    # Convert to float32 numpy immediately — avoids keeping a fat DataFrame alive
+    X_np = X.values.astype(np.float32)
+    # Replace inf / NaN in-place
+    np.nan_to_num(X_np, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return X_np, binary_label, feature_cols
 
 
 def stratified_split(X: np.ndarray, y: np.ndarray, test_size: float, random_state: int):
