@@ -6,8 +6,8 @@ class EnhancedConfig:
     input_path: str = "data/cicids2017/cicids2017.csv"
     output_dir: str = "artifacts"
     epochs: int = 35
-    batch_size: int = 512
-    val_batch_size: int = 1024
+    batch_size: int = 1024
+    val_batch_size: int = 2048
     d_model: int = 160
     num_layers: int = 4
     heads: int = 10
@@ -32,7 +32,8 @@ class EnhancedConfig:
     mixup_alpha: float = 0.2
     group_size: int = 8
     use_multi_gpu: bool = False
-    num_workers: int = 4
+    num_workers: int = 2
+    max_train_samples: int = 500_000  # cap training set after balancing
 
 
 @dataclass
@@ -42,8 +43,8 @@ class CNNTransformerConfig:
     test_size: float = 0.2
     random_state: int = 42
     epochs: int = 25
-    batch_size: int = 256
-    val_batch_size: int = 512
+    batch_size: int = 1024
+    val_batch_size: int = 2048
     lr: float = 1.5e-3
     weight_decay: float = 1e-4
     label_smoothing: float = 0.05
@@ -56,5 +57,6 @@ class CNNTransformerConfig:
     undersampling_ratio: float = 0.15
     ig_steps: int = 32
     ig_samples: int = 512
-    num_workers: int = 4
+    num_workers: int = 2
+    max_train_samples: int = 500_000  # cap training set after balancing
 

@@ -108,9 +108,8 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
     balancer = IntelligentDataBalancer(config.undersampling_ratio, config.random_state)
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
     input_dim = X_train.shape[1]
-    del X_train, y_train; gc.collect()  # free pre-balance arrays
-    # num_workers=0 avoids forked subprocesses that duplicate memory on Colab
-    n_workers = 0 if torch.cuda.is_available() else config.num_workers
+    del X_train, y_train; gc.collect()
+    max_samples = getattr(config, 'max_train_samples', 0)
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -118,9 +117,12 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         y_val,
         batch_size=config.batch_size,
         val_batch_size=config.val_batch_size,
-        num_workers=n_workers,
+        num_workers=config.num_workers,
+        max_train_samples=max_samples,
     )
-    del X_train_bal, y_train_bal; gc.collect()  # now in TensorDataset
+    print(f"Training: {len(train_loader.dataset)} samples, {len(train_loader)} batches/epoch")
+    print(f"Validation: {len(val_loader.dataset)} samples")
+    del X_train_bal, y_train_bal; gc.collect()
     model = CNNTransformerIDS(
         input_dim=input_dim,
         d_model=config.d_model,

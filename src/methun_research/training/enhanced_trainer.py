@@ -170,8 +170,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
     input_dim = X_train.shape[1]
     del X_train, y_train; gc.collect()
-    # num_workers=0 avoids forked subprocesses that duplicate memory on Colab
-    n_workers = 0 if torch.cuda.is_available() else config.num_workers
+    max_samples = getattr(config, 'max_train_samples', 0)
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -179,7 +178,8 @@ def train_enhanced(config: EnhancedConfig | None = None):
         y_val,
         batch_size=config.batch_size,
         val_batch_size=config.val_batch_size,
-        num_workers=n_workers,
+        num_workers=config.num_workers,
+        max_train_samples=max_samples,
     )
     test_loader = None
     if len(y_test) > 0:
@@ -188,9 +188,12 @@ def train_enhanced(config: EnhancedConfig | None = None):
             test_dataset,
             batch_size=config.val_batch_size,
             shuffle=False,
-            num_workers=n_workers,
+            num_workers=config.num_workers,
             pin_memory=True,
+            persistent_workers=config.num_workers > 0,
         )
+    print(f"Training: {len(train_loader.dataset)} samples, {len(train_loader)} batches/epoch")
+    print(f"Validation: {len(val_loader.dataset)} samples")
     del X_train_bal, X_val, y_val, X_test, y_test; gc.collect()
     class_counts = np.bincount(y_train_bal, minlength=2)
     total = len(y_train_bal)
