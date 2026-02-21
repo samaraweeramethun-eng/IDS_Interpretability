@@ -9,25 +9,45 @@ import torch.nn.functional as F
 
 
 class FeatureImportanceLayer(nn.Module):
-    def __init__(self, input_dim: int, d_model: int):
+    """Tokenize the feature vector into groups and project each to *d_model*.
+
+    Instead of collapsing all features into a single token (which makes
+    self-attention degenerate), the features are split into groups of
+    ``group_size`` so the downstream Transformer blocks receive a meaningful
+    sequence of tokens.
+    """
+
+    def __init__(self, input_dim: int, d_model: int, group_size: int = 8):
         super().__init__()
+        self.input_dim = input_dim
+        self.group_size = group_size
+        self.num_tokens = math.ceil(input_dim / group_size)
+        self.padded_dim = self.num_tokens * group_size
+
         self.feature_attention = nn.Sequential(
             nn.Linear(input_dim, d_model),
             nn.Tanh(),
             nn.Linear(d_model, input_dim),
             nn.Sigmoid(),
         )
-        self.projection = nn.Linear(input_dim, d_model)
+        # Project each feature group to d_model
+        self.projection = nn.Linear(group_size, d_model)
         self.layer_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         importance = self.feature_attention(x)
         attended = x * importance
-        embedded = self.projection(attended)
+        # Pad to make the feature dim divisible by group_size
+        if self.padded_dim > self.input_dim:
+            attended = F.pad(attended, (0, self.padded_dim - self.input_dim))
+        # Reshape into groups: (B, num_tokens, group_size)
+        tokens = attended.view(attended.size(0), self.num_tokens, self.group_size)
+        # Project each group to d_model: (B, num_tokens, d_model)
+        embedded = self.projection(tokens)
         embedded = self.layer_norm(embedded)
         embedded = self.dropout(embedded)
-        return embedded.unsqueeze(1), importance
+        return embedded, importance
 
 
 class EnhancedMultiHeadAttention(nn.Module):
@@ -101,9 +121,9 @@ class AttentionPoolingClassifier(nn.Module):
 
 
 class EnhancedBinaryTransformerClassifier(nn.Module):
-    def __init__(self, input_dim: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, dropout: float):
+    def __init__(self, input_dim: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, dropout: float, group_size: int = 8):
         super().__init__()
-        self.feature_embedder = FeatureImportanceLayer(input_dim, d_model)
+        self.feature_embedder = FeatureImportanceLayer(input_dim, d_model, group_size)
         self.transformer_blocks = nn.ModuleList([
             EnhancedTransformerBlock(d_model, num_heads, d_ff, dropout)
             for _ in range(num_layers)

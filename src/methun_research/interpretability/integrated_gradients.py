@@ -10,13 +10,16 @@ def integrated_gradients(model, inputs, baseline=None, steps=32, target_class=1)
     if baseline is None:
         baseline = torch.zeros_like(inputs, device=device)
     total_gradients = torch.zeros_like(inputs)
-    for alpha in torch.linspace(0, 1, steps, device=device):
-        interpolated = baseline + alpha * (inputs - baseline)
-        interpolated.requires_grad_(True)
-        outputs = model(interpolated)
-        target = outputs[:, target_class].sum()
-        grads = torch.autograd.grad(target, interpolated, retain_graph=False)[0]
-        total_gradients += grads
+    with torch.enable_grad():
+        for alpha in torch.linspace(0, 1, steps, device=device):
+            interpolated = baseline + alpha * (inputs - baseline)
+            interpolated.requires_grad_(True)
+            outputs = model(interpolated)
+            if isinstance(outputs, (tuple, list)):
+                outputs = outputs[0]
+            target = outputs[:, target_class].sum()
+            grads = torch.autograd.grad(target, interpolated, retain_graph=False)[0]
+            total_gradients += grads
     avg_gradients = total_gradients / steps
     return (inputs - baseline) * avg_gradients
 
@@ -31,8 +34,6 @@ def generate_ig_report(model, X_val, feature_names, output_dir, steps=32, sample
     baseline = torch.FloatTensor(X_val.mean(axis=0, keepdims=True)).to(next(model.parameters()).device)
     ig_values = []
     model.eval()
-    with torch.no_grad():
-        pass
     for chunk in torch.split(data, 128):
         base_chunk = baseline.expand(chunk.size(0), -1)
         ig_chunk = integrated_gradients(model, chunk, baseline=base_chunk, steps=steps)

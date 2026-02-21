@@ -21,7 +21,8 @@ def load_checkpoint(checkpoint_path: str):
 
 
 def _build_enhanced_model(state, cfg, device):
-    input_dim = state["feature_embedder.projection.weight"].shape[1]
+    # Infer input_dim from the first linear in the feature attention network
+    input_dim = state["feature_embedder.feature_attention.0.weight"].shape[1]
     model = EnhancedBinaryTransformerClassifier(
         input_dim=input_dim,
         d_model=cfg.get("d_model", 160),
@@ -29,6 +30,7 @@ def _build_enhanced_model(state, cfg, device):
         num_heads=cfg.get("heads", 10),
         d_ff=cfg.get("d_ff", 640),
         dropout=cfg.get("dropout", 0.15),
+        group_size=cfg.get("group_size", 8),
     ).to(device)
     return model
 
@@ -208,12 +210,12 @@ def run_shap(
             out = self.base(x)
             return out[0] if isinstance(out, (tuple, list)) else out
     logits_model = LogitsOnly(model).to(device)
-    explainer = shap.DeepExplainer(logits_model, background)
+    explainer = shap.GradientExplainer(logits_model, background)
     shap_values = []
     start = 0
     while start < eval_tensor.shape[0]:
         end = min(start + chunk_size, eval_tensor.shape[0])
-        raw_sv = explainer.shap_values(eval_tensor[start:end], check_additivity=False)
+        raw_sv = explainer.shap_values(eval_tensor[start:end])
         if isinstance(raw_sv, (list, tuple)):
             class_sv = raw_sv[1]
             if start == 0:
@@ -260,9 +262,12 @@ def run_shap(
     else:
         target_idx = int(np.argmax(probs))
     try:
+        with torch.no_grad():
+            base_output = logits_model(background)
+            base_value = float(base_output[:, 1].mean().cpu().item())
         explanation = shap.Explanation(
             values=sv[target_idx],
-            base_values=float(np.array(explainer.expected_value[1]).mean()),
+            base_values=base_value,
             data=eval_tensor[target_idx].detach().cpu().numpy(),
             feature_names=feature_cols,
         )

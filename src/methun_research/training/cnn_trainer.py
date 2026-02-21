@@ -22,6 +22,7 @@ from methun_research.data import (
 from methun_research.models.cnn_transformer import CNNTransformerIDS
 from methun_research.utils.device import setup_device
 from methun_research.interpretability.integrated_gradients import generate_ig_report
+from methun_research.interpretability.grad_cam import generate_gradcam_report
 
 
 def _set_seeds(seed: int):
@@ -188,6 +189,14 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         feature_cols,
         config.output_dir,
         steps=config.ig_steps,
+        sample_size=config.ig_samples,
+        seed=config.random_state,
+    )
+    generate_gradcam_report(
+        final_model,
+        X_val,
+        feature_cols,
+        config.output_dir,
         sample_size=config.ig_samples,
         seed=config.random_state,
     )

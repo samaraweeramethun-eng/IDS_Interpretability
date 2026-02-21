@@ -1,175 +1,277 @@
-# Methun Research IDS Experiments
+# Methun Research — XAI for Intrusion Detection with CNN-Transformer
 
-This repository contains experiments on the CICIDS2017 intrusion detection dataset using two model families:
+> Explainable AI (XAI) pipeline for network intrusion detection using CNN-Transformer hybrids on the CICIDS2017 dataset.
 
-- A CNN + Transformer hybrid tuned for packet-feature sequences
-- An enhanced Transformer with focal loss, SWA, mixup, and additional regularization
+This project trains two Transformer-based IDS models and explains their predictions with **four XAI methods**: Integrated Gradients, Grad-CAM, SHAP, and learned feature-importance gates.
 
-The project also includes SHAP-based interpretability utilities to audit trained checkpoints.
+## Quick Start — Google Colab (Recommended)
 
-## 1. Prerequisites
+The fastest way to run everything is with the **ready-made Colab notebook** — no local setup needed.
 
-- Python 3.10+ (3.11 recommended)
-- Git
-- At least 20 GB of free disk space for data + checkpoints
-- (Optional) CUDA-capable GPU for faster training
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/<your-org>/methun-research/blob/main/colab_pipeline.ipynb)
 
-## 2. Clone and Environment Setup
+1. Click the badge above (or upload `colab_pipeline.ipynb` manually to Colab)
+2. Set runtime to **GPU → T4**: *Runtime → Change runtime type → T4 GPU*
+3. Run all cells — the notebook walks through setup, training, and XAI automatically
+
+> **Estimated time on T4 GPU:** ~10 min (sample) / ~45 min (full 2.8 M row dataset)
+
+## Models
+
+| Model | Architecture | XAI Methods |
+|-------|-------------|-------------|
+| **CNN-Transformer** | 1D-CNN tokenizer → Transformer encoder → CLS classifier | Integrated Gradients, Grad-CAM, SHAP |
+| **Enhanced Transformer** | Feature-gated group tokenizer → Transformer encoder → Attention pooling | SHAP, learned feature gates |
+
+## XAI Methods
+
+| Method | Type | What it explains |
+|--------|------|-----------------|
+| **Integrated Gradients** | Post-hoc, gradient-based | Per-feature attribution from a zero baseline |
+| **Grad-CAM** | Post-hoc, activation-based | Which CNN feature positions activate for attacks |
+| **SHAP (GradientExplainer)** | Post-hoc, Shapley-value | Global & local feature importance with theory guarantees |
+| **Feature Gates** | Intrinsic (built-in) | Learned sigmoid attention over raw features |
+
+## Project Structure
+
+```
+colab_pipeline.ipynb          # <<< One-click Colab notebook (start here)
+scripts/
+  run_pipeline.py             # CLI: train + SHAP in one command
+  run_shap.py                 # CLI: standalone SHAP on existing checkpoint
+  train_cnn_transformer.py    # CLI: train CNN-Transformer only
+  train_enhanced.py           # CLI: train Enhanced Transformer only
+  validate_pipeline.py        # Quick local smoke test (5 K rows)
+  train_cpu.py                # CPU-optimised training (small model)
+src/methun_research/
+  config.py                   # Dataclass configs for both models
+  data.py                     # Preprocessing, balancing, dataloaders
+  models/
+    cnn_transformer.py        # CNN + Transformer hybrid
+    transformer.py            # Enhanced Transformer with group tokenizer
+  training/
+    cnn_trainer.py            # Full training loop (CNN model)
+    enhanced_trainer.py       # Full training loop (Enhanced model)
+  interpretability/
+    integrated_gradients.py   # IG attributions
+    grad_cam.py               # Grad-CAM for CNN layers
+    shap_runner.py            # SHAP GradientExplainer pipeline
+  utils/
+    device.py                 # GPU/CPU auto-detection
+data/cicids2017/              # Place dataset CSVs here
+artifacts/                    # Checkpoints + XAI outputs (auto-created)
+```
+
+## Local Setup
+
+### Prerequisites
+
+- Python 3.10+
+- 16 GB+ RAM (32 GB recommended for the full dataset)
+- (Optional) CUDA GPU — without it, use the sample dataset or Colab
+
+### Install
 
 ```bash
-# 1) Clone
 git clone https://github.com/<your-org>/methun-research.git
 cd methun-research
 
-# 2) Create a virtual environment (Windows PowerShell example)
 python -m venv .venv
+# Windows PowerShell
 .\.venv\Scripts\Activate.ps1
+# Linux / macOS
+# source .venv/bin/activate
 
-# 3) Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
-# (Optional) install the package in editable mode if you plan to import it elsewhere
-# pip install -e .
 ```
 
-The `requirements.txt` file installs the project (through `-e .`) together with every dependency declared in `pyproject.toml`, so sharing that single file is enough to recreate the environment on a fresh machine.
+### Data
 
-## 3. Data Preparation
+1. Download CICIDS2017 from the [Canadian Institute for Cybersecurity](https://www.unb.ca/cic/datasets/ids-2017.html)
+2. Place the consolidated CSV at `data/cicids2017/cicids2017.csv`
+3. A 5 000-row sample is included at `data/cicids2017/cicids2017_sample.csv` for smoke tests
 
-1. Download the CICIDS2017 dataset from the Canadian Institute for Cybersecurity portal.
-2. Consolidate the CSV files into `data/cicids2017/cicids2017.csv` (matching the default config path).
-3. Large raw splits are already listed under `data/network intrusion dataset/` for reproducibility—verify integrity before training.
-
-> Tip: Keep the processed CSV compressed elsewhere; the working copy should remain under `data/` so scripts can resolve relative paths.
-
-## 4. Training Entry Points
-
-Both scripts live in `scripts/` and simply instantiate the configs in `src/methun_research/config.py`.
-
-### 4.1 CNN + Transformer Hybrid
+### Train + XAI (one command)
 
 ```bash
-python scripts/train_cnn_transformer.py \
-  --epochs 25 \
-  --batch-size 256
-```
-
-Arguments are defined in `CNNTransformerConfig`. Override any attribute by editing the dataclass or by wiring up argparse (coming soon). Artifacts (checkpoints, logs, metrics) are saved to `artifacts/` by default.
-
-### 4.2 Enhanced Transformer Baseline
-
-```bash
-python scripts/train_enhanced.py
-```
-
-Key differences vs. the hybrid:
-
-- Focal loss and optional class weighting
-- Mixup augmentation and gradient accumulation
-- Stochastic Weight Averaging (SWA)
-
-Adjust hyperparameters inside `EnhancedConfig` before launching jobs.
-
-### 4.3 One-Command Pipeline (Train ➜ Test ➜ SHAP)
-
-Prefer to train, evaluate on a held-out test split, and immediately run SHAP without juggling multiple commands? Use the pipeline helper:
-
-```bash
+# Full pipeline: train CNN-Transformer then run SHAP
 python scripts/run_pipeline.py \
-  --epochs 5 \
-  --background 400 --eval 400 --pool 5000 \
-  --chunk 128 --topk 15
+  --model cnn \
+  --data data/cicids2017/cicids2017.csv \
+  --epochs 25 \
+  --batch-size 256 \
+  --background 2000 --eval 2000 --pool 150000
 ```
 
-What happens when you launch this command:
+### Train models individually
 
-- **Train/Val/Test split** – `EnhancedConfig` now exposes `val_size` (default 0.1) and `test_size` (default 0.2). The pipeline first stratifies CICIDS2017 into train/val/test, balances only the training fold, then reports validation metrics each epoch and prints a final `Test Loss … | Test AUC …` line for the untouched test set.
-- **Training overrides** – Pass any of the familiar knobs (`--epochs`, `--batch-size`, `--val-batch-size`, `--lr`, `--undersample`, `--num-workers`, `--seed`) to customize the Enhanced Transformer run without editing code.
-- **SHAP controls** – Flags (`--background`, `--eval`, `--pool`, `--chunk`, `--topk`) mirror `scripts/run_shap.py`. The SHAP runner streams the dataset, so modest values (e.g., 400/400/5000) work on CPU-only machines; scale them up on beefier hardware.
-- **Artifacts** – Checkpoints land in `--output` (default `artifacts/`); SHAP exports (`shap_global_importance_attack.csv`, `shap_summary_attack.png`, `shap_waterfall_attack.png`, plus logs) are written to `<output>/shap/` unless `--shap-dir` is provided.
-- **Checkpoint reuse** – To skip retraining, add `--skip-training --checkpoint artifacts/enhanced_binary_rtids_model.pth`; the script will jump straight to SHAP using your existing model.
+```bash
+# CNN-Transformer (generates IG + Grad-CAM automatically)
+python scripts/run_pipeline.py --model cnn --epochs 25
 
-## 5. Interpretability with SHAP
+# Enhanced Transformer
+python scripts/run_pipeline.py --model enhanced --epochs 35
+```
 
-After training, run SHAP to inspect feature importance:
+### Run SHAP on an existing checkpoint
 
 ```bash
 python scripts/run_shap.py \
-  --checkpoint artifacts/best_model.pt \
+  --checkpoint artifacts/cnn_transformer_ids.pth \
   --data data/cicids2017/cicids2017.csv \
-  --output artifacts/shap \
-  --chunk 256 --background 2000 --eval 2000 --pool 150000
+  --output artifacts/shap
 ```
 
-Outputs include summary plots and serialized SHAP values for reproducibility.
+### Quick smoke test (CPU, ~1 min)
 
-## 6. Project Layout
-
-```
-artifacts/                # Checkpoints, tensorboard runs, SHAP outputs
-scripts/                  # Thin CLI wrappers for training + SHAP
-src/methun_research/      # Core package (configs, models, trainers, utils)
-data/                     # CICIDS2017 csv + raw splits
-pyproject.toml            # Python dependency spec
-methun-research.ipynb     # Scratchpad for dataset exploration
+```bash
+python scripts/validate_pipeline.py
 ```
 
-## 7. Running on Google Colab
+This runs all 3 steps (CNN training → Enhanced training → SHAP) on the 5 000-row sample with tiny model sizes to verify everything works.
 
-Need GPU acceleration or a clean slate? Follow these steps to reproduce the full training + SHAP pipeline inside [Google Colab](https://colab.research.google.com/):
+## Google Colab — Step-by-Step
 
-1. **Create a GPU runtime** - `Runtime > Change runtime type > GPU`. (High-RAM runtimes reduce pandas/SHAP memory pressure.)
-2. **Clone the repo & install dependencies** in the first cell:
+If you prefer running cells manually instead of using the notebook:
 
-  ```bash
-  !git clone https://github.com/<your-org>/methun-research.git
-  %cd methun-research
-  !pip install -U pip
-  !pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-  !pip install -r requirements.txt
-  ```
+### 1. Create a GPU runtime
 
-  > The extra `pip install torch ... --index-url ...` grabs the latest CUDA wheel that matches Colab's GPU drivers; the subsequent `requirements.txt` install reuses that wheel.
+*Runtime → Change runtime type → T4 GPU*
 
-3. **Make the CICIDS2017 CSV available**. Two common options:
+### 2. Clone & install
 
-  - *Mount Google Drive* (recommended for the full dataset):
+```python
+!git clone https://github.com/<your-org>/methun-research.git
+%cd methun-research
+!pip install -q torch --index-url https://download.pytorch.org/whl/cu121
+!pip install -q -r requirements.txt
+```
 
-    ```python
-    from google.colab import drive
-    drive.mount('/content/drive', force_remount=True)
-    !mkdir -p data/cicids2017
-    !ln -s /content/drive/MyDrive/cicids2017/cicids2017.csv data/cicids2017/cicids2017.csv
-    ```
+### 3. Upload or mount data
 
-  - *Upload a quick sample* (good for smoke tests):
+**Option A — Google Drive (recommended for full dataset):**
 
-    ```python
-    from google.colab import files
-    uploaded = files.upload()
-    uploaded_name = next(iter(uploaded))
-    !mkdir -p data/cicids2017
-    !mv "$uploaded_name" data/cicids2017/cicids2017.csv
-    ```
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p data/cicids2017
+!ln -sf /content/drive/MyDrive/cicids2017/cicids2017.csv data/cicids2017/cicids2017.csv
+```
 
-4. **Run the pipeline** (artifacts are saved locally unless you point `--output` at Drive):
+**Option B — Direct upload:**
 
-  ```bash
-  !python scripts/run_pipeline.py \
-     --model cnn \
-     --epochs 10 \
-     --batch-size 512 --val-batch-size 1024 \
-     --chunk 128 --background 800 --eval 800 --pool 6000 \
-     --output /content/drive/MyDrive/methun_artifacts
-  ```
+```python
+from google.colab import files
+uploaded = files.upload()
+!mkdir -p data/cicids2017
+!mv "{list(uploaded.keys())[0]}" data/cicids2017/cicids2017.csv
+```
 
-  - Lower the SHAP knobs (`--chunk`, `--background`, `--eval`, `--pool`) if you hit RAM limits.
-  - `build_dataloaders()` now auto-disables `pin_memory` when CUDA isn't available, so CPU-only Colab runtimes also work out of the box.
+**Option C — Use included sample (no upload needed):**
 
-## 8. Next Steps
+The 5 000-row sample at `data/cicids2017/cicids2017_sample.csv` is already in the repo.
 
-- Add argparse overrides to the training scripts for ad-hoc sweeps
-- Integrate Weights & Biases or MLflow tracking
-- Extend the interpretability suite with Integrated Gradients comparisons
+### 4. Train CNN-Transformer
 
-Feel free to open issues or PRs for enhancements, data-processing scripts, or bug fixes.
+```python
+import os, warnings
+os.environ['TORCHDYNAMO_DISABLE'] = '1'
+warnings.filterwarnings('ignore')
+
+from methun_research.config import CNNTransformerConfig
+from methun_research.training.cnn_trainer import train_cnn_transformer
+
+cfg = CNNTransformerConfig(
+    input_path='data/cicids2017/cicids2017.csv',
+    epochs=25, batch_size=256, num_workers=2,
+)
+cnn_path = train_cnn_transformer(cfg)
+```
+
+### 5. Train Enhanced Transformer
+
+```python
+from methun_research.config import EnhancedConfig
+from methun_research.training.enhanced_trainer import train_enhanced
+
+cfg = EnhancedConfig(
+    input_path='data/cicids2017/cicids2017.csv',
+    epochs=35, batch_size=512, num_workers=2,
+)
+enh_path = train_enhanced(cfg)
+```
+
+### 6. Run SHAP
+
+```python
+from methun_research.interpretability.shap_runner import run_shap
+
+shap_csv = run_shap(
+    checkpoint_path=cnn_path,
+    data_path='data/cicids2017/cicids2017.csv',
+    output_dir='artifacts/shap',
+    background_size=2000, eval_size=2000, eval_pool=150000,
+)
+```
+
+### 7. View results
+
+```python
+import pandas as pd
+from IPython.display import display, Image
+
+# Feature rankings
+for f in ['artifacts/cnn_transformer_integrated_gradients.csv',
+          'artifacts/cnn_transformer_grad_cam.csv',
+          'artifacts/shap/shap_global_importance_attack.csv']:
+    if os.path.exists(f):
+        print(f'\n--- {os.path.basename(f)} ---')
+        display(pd.read_csv(f).head(15))
+
+# Plots
+for f in ['artifacts/grad_cam_importance.png',
+          'artifacts/shap/shap_summary_attack.png',
+          'artifacts/shap/shap_waterfall_attack.png']:
+    if os.path.exists(f):
+        display(Image(filename=f, width=700))
+```
+
+### 8. Save to Google Drive
+
+```python
+import shutil
+shutil.copytree('artifacts', '/content/drive/MyDrive/methun_artifacts', dirs_exist_ok=True)
+```
+
+## Outputs
+
+After a full run, the `artifacts/` directory contains:
+
+| File | Description |
+|------|-------------|
+| `cnn_transformer_ids.pth` | CNN-Transformer checkpoint (weights + preprocessor + config) |
+| `enhanced_binary_rtids_model.pth` | Enhanced Transformer checkpoint |
+| `cnn_transformer_integrated_gradients.csv` | IG feature importance ranking |
+| `cnn_transformer_grad_cam.csv` | Grad-CAM feature importance ranking |
+| `grad_cam_importance.png` | Grad-CAM bar chart |
+| `shap/shap_global_importance_attack.csv` | SHAP feature importance ranking |
+| `shap/shap_summary_attack.png` | SHAP beeswarm summary plot |
+| `shap/shap_waterfall_attack.png` | SHAP waterfall for highest-confidence attack |
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@misc{methun2026xai_ids,
+  title={Explainable CNN-Transformer Intrusion Detection on CICIDS2017},
+  author={Methun Research},
+  year={2026},
+  url={https://github.com/<your-org>/methun-research}
+}
+```
+
+## License
+
+MIT

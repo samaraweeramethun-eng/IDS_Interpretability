@@ -43,6 +43,7 @@ def _create_model(config: EnhancedConfig, input_dim: int, device: torch.device, 
         num_heads=config.heads,
         d_ff=config.d_ff,
         dropout=config.dropout,
+        group_size=config.group_size,
     ).to(device)
     if multi_gpu:
         model = DataParallel(model)
@@ -185,11 +186,11 @@ def train_enhanced(config: EnhancedConfig | None = None):
             num_workers=config.num_workers,
             pin_memory=True,
         )
-    class_counts = np.bincount(y_train_bal)
+    class_counts = np.bincount(y_train_bal, minlength=2)
     total = len(y_train_bal)
     class_weights = torch.FloatTensor([
-        total / (2 * class_counts[0]),
-        total / (2 * class_counts[1]),
+        total / (2 * max(class_counts[0], 1)),
+        total / (2 * max(class_counts[1], 1)),
     ]).to(device)
     model = _create_model(config, X_train.shape[1], device, multi_gpu)
     criterion = AdaptiveFocalLoss(
@@ -233,6 +234,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
                 "metrics": metrics,
                 "config": config.__dict__,
                 "feature_columns": feature_cols,
+                "preprocessor": preprocessor,
                 "model_type": "enhanced_transformer",
             }
     if best_state is None:

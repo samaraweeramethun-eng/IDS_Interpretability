@@ -30,7 +30,7 @@ class EnhancedConfig:
     swa_freq: int = 3
     use_mixup: bool = True
     mixup_alpha: float = 0.2
-    gradient_accumulation_steps: int = 2
+    group_size: int = 8
     use_multi_gpu: bool = False
     num_workers: int = 4
 
