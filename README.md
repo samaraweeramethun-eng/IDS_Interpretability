@@ -8,7 +8,7 @@ This project trains two Transformer-based IDS models and explains their predicti
 
 The fastest way to run everything is with the **ready-made Colab notebook** — no local setup needed.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/<your-org>/methun-research/blob/main/colab_pipeline.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/samaraweeramethun-eng/IDS_Interpretability/blob/main/colab_pipeline.ipynb)
 
 1. Click the badge above (or upload `colab_pipeline.ipynb` manually to Colab)
 2. Set runtime to **GPU → T4**: *Runtime → Change runtime type → T4 GPU*
@@ -73,8 +73,8 @@ artifacts/                    # Checkpoints + XAI outputs (auto-created)
 ### Install
 
 ```bash
-git clone https://github.com/<your-org>/methun-research.git
-cd methun-research
+git clone https://github.com/samaraweeramethun-eng/IDS_Interpretability.git
+cd IDS_Interpretability
 
 python -m venv .venv
 # Windows PowerShell
@@ -142,8 +142,8 @@ If you prefer running cells manually instead of using the notebook:
 ### 2. Clone & install
 
 ```python
-!git clone https://github.com/<your-org>/methun-research.git
-%cd methun-research
+!git clone https://github.com/samaraweeramethun-eng/IDS_Interpretability.git
+%cd IDS_Interpretability
 !pip install -q torch --index-url https://download.pytorch.org/whl/cu121
 !pip install -q -r requirements.txt
 ```
@@ -268,7 +268,7 @@ If you use this code in your research, please cite:
   title={Explainable CNN-Transformer Intrusion Detection on CICIDS2017},
   author={Methun Research},
   year={2026},
-  url={https://github.com/<your-org>/methun-research}
+  url={https://github.com/samaraweeramethun-eng/IDS_Interpretability}
 }
 ```
 
