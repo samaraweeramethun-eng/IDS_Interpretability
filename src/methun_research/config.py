@@ -40,6 +40,7 @@ class EnhancedConfig:
 class CNNTransformerConfig:
     input_path: str = "data/cicids2017/cicids2017.csv"
     output_dir: str = "artifacts"
+    val_size: float = 0.1
     test_size: float = 0.2
     random_state: int = 42
     epochs: int = 25

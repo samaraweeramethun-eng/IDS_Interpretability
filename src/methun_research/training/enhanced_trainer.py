@@ -255,7 +255,17 @@ def train_enhanced(config: EnhancedConfig | None = None):
         target_model.load_state_dict(best_state["model_state_dict"])
         test_loss, test_metrics = _eval_epoch(model, test_loader, criterion, device)
         print(
-            f"Test Loss {test_loss:.4f} | Test AUC {test_metrics['auc_roc']:.4f} | Test F1 {test_metrics['f1_score']:.4f}"
+            f"\n{'='*60}\n"
+            f"TEST SET RESULTS (held-out, never used for training/validation)\n"
+            f"{'='*60}\n"
+            f"  Loss:      {test_loss:.4f}\n"
+            f"  ROC-AUC:   {test_metrics['auc_roc']:.4f}\n"
+            f"  PR-AUC:    {test_metrics['auc_pr']:.4f}\n"
+            f"  F1-Score:  {test_metrics['f1_score']:.4f}\n"
+            f"  Precision: {test_metrics['precision']:.4f}\n"
+            f"  Recall:    {test_metrics['recall']:.4f}\n"
+            f"  Accuracy:  {test_metrics['accuracy']:.4f}\n"
+            f"{'='*60}"
         )
         best_state["test_metrics"] = test_metrics
     else:

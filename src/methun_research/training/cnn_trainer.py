@@ -33,14 +33,37 @@ def _set_seeds(seed: int):
 
 
 def _prepare_scaled_data(X_np: np.ndarray, y: np.ndarray, config: CNNTransformerConfig):
-    """Split, scale, return float32 arrays. X_np must already be clean float32."""
-    X_train_raw, X_val_raw, y_train, y_val = train_test_split(
+    """Three-way split (train/val/test), scale, return float32 arrays."""
+    val_ratio = getattr(config, 'val_size', 0.1)
+    test_ratio = config.test_size
+    holdout_ratio = val_ratio + test_ratio
+    # First split: train vs (val + test)
+    X_train_raw, X_holdout, y_train, y_holdout = train_test_split(
         X_np,
         y,
-        test_size=config.test_size,
+        test_size=holdout_ratio,
         stratify=y,
         random_state=config.random_state,
     )
+    # Second split: val vs test
+    if val_ratio > 0 and test_ratio > 0 and len(y_holdout) > 0:
+        test_fraction = test_ratio / holdout_ratio
+        X_val_raw, X_test_raw, y_val, y_test = train_test_split(
+            X_holdout,
+            y_holdout,
+            test_size=test_fraction,
+            stratify=y_holdout,
+            random_state=config.random_state,
+        )
+    elif val_ratio > 0:
+        X_val_raw, y_val = X_holdout, y_holdout
+        X_test_raw = np.empty((0, X_np.shape[1]), dtype=np.float32)
+        y_test = np.empty(0, dtype=np.int64)
+    else:
+        X_test_raw, y_test = X_holdout, y_holdout
+        X_val_raw = np.empty((0, X_np.shape[1]), dtype=np.float32)
+        y_val = np.empty(0, dtype=np.int64)
+    del X_holdout, y_holdout; gc.collect()
     # Compute column medians for the preprocessing artifact (needed at inference)
     train_medians = pd.Series(np.nanmedian(X_train_raw, axis=0))
     scaler = StandardScaler()
@@ -48,7 +71,9 @@ def _prepare_scaled_data(X_np: np.ndarray, y: np.ndarray, config: CNNTransformer
     del X_train_raw; gc.collect()
     X_val = scaler.transform(X_val_raw).astype(np.float32)
     del X_val_raw; gc.collect()
-    return X_train, X_val, y_train, y_val, scaler, train_medians
+    X_test = scaler.transform(X_test_raw).astype(np.float32) if len(X_test_raw) > 0 else np.empty((0, X_train.shape[1]), dtype=np.float32)
+    del X_test_raw; gc.collect()
+    return X_train, X_val, X_test, y_train, y_val, y_test, scaler, train_medians
 
 
 def _train_epoch(model, loader, criterion, optimizer, scheduler, device):
@@ -103,7 +128,7 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
     label_col = detect_label_column(df)
     X, y, feature_cols = prepare_features(df, label_col)
     del df; gc.collect()  # free ~1.7 GB
-    X_train, X_val, y_train, y_val, scaler, medians = _prepare_scaled_data(X, y, config)
+    X_train, X_val, X_test, y_train, y_val, y_test, scaler, medians = _prepare_scaled_data(X, y, config)
     del X; gc.collect()  # free unsplit feature DataFrame
     balancer = IntelligentDataBalancer(config.undersampling_ratio, config.random_state)
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
@@ -120,9 +145,23 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         num_workers=config.num_workers,
         max_train_samples=max_samples,
     )
-    print(f"Training: {len(train_loader.dataset)} samples, {len(train_loader)} batches/epoch")
+    # Build test loader for held-out evaluation
+    from torch.utils.data import TensorDataset, DataLoader as DL
+    test_loader = None
+    if len(y_test) > 0:
+        test_dataset = TensorDataset(torch.FloatTensor(X_test), torch.LongTensor(y_test))
+        test_loader = DL(
+            test_dataset,
+            batch_size=config.val_batch_size,
+            shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=config.num_workers > 0,
+        )
+    print(f"Training:   {len(train_loader.dataset)} samples, {len(train_loader)} batches/epoch")
     print(f"Validation: {len(val_loader.dataset)} samples")
-    del X_train_bal, y_train_bal; gc.collect()
+    print(f"Test:       {len(y_test)} samples (held-out, never seen during training)")
+    del X_train_bal, y_train_bal, X_test, y_test; gc.collect()
     model = CNNTransformerIDS(
         input_dim=input_dim,
         d_model=config.d_model,
@@ -176,6 +215,27 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
     if best_state is None:
         print("Training failed to improve beyond initialization.")
         return None
+    # ── Final evaluation on held-out test set ─────────────────────────
+    if test_loader is not None and len(test_loader.dataset) > 0:
+        final_model_eval = model.module if isinstance(model, DataParallel) else model
+        final_model_eval.load_state_dict(best_state["model_state_dict"])
+        test_loss, test_metrics, _, _ = _eval_epoch(model, test_loader, criterion, device)
+        print(
+            f"\n{'='*60}\n"
+            f"TEST SET RESULTS (held-out, never used for training/validation)\n"
+            f"{'='*60}\n"
+            f"  Loss:      {test_loss:.4f}\n"
+            f"  ROC-AUC:   {test_metrics['auc_roc']:.4f}\n"
+            f"  PR-AUC:    {test_metrics['auc_pr']:.4f}\n"
+            f"  F1-Score:  {test_metrics['f1_score']:.4f}\n"
+            f"  Precision: {test_metrics['precision']:.4f}\n"
+            f"  Recall:    {test_metrics['recall']:.4f}\n"
+            f"  Accuracy:  {test_metrics['accuracy']:.4f}\n"
+            f"{'='*60}"
+        )
+        best_state["test_metrics"] = test_metrics
+    else:
+        print("No held-out test set configured; skipping test evaluation.")
     model_path = os.path.join(config.output_dir, "cnn_transformer_ids.pth")
     torch.save(best_state, model_path)
     print(f"Saved CNN-Transformer checkpoint -> {model_path}")
