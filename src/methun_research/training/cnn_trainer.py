@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import joblib
@@ -49,8 +50,10 @@ def _prepare_scaled_data(X: pd.DataFrame, y: np.ndarray, config: CNNTransformerC
         .fillna(train_medians)
     )
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train_raw)
-    X_val = scaler.transform(X_val_raw)
+    X_train = scaler.fit_transform(X_train_raw).astype(np.float32)
+    X_val = scaler.transform(X_val_raw).astype(np.float32)
+    del X_train_raw, X_val_raw
+    gc.collect()
     return X_train, X_val, y_train, y_val, scaler, train_medians
 
 
@@ -105,9 +108,13 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
     df = pd.read_csv(config.input_path, engine="python")
     label_col = detect_label_column(df)
     X, y, feature_cols = prepare_features(df, label_col)
+    del df; gc.collect()  # free ~1.7 GB
     X_train, X_val, y_train, y_val, scaler, medians = _prepare_scaled_data(X, y, config)
+    del X; gc.collect()  # free unsplit feature DataFrame
     balancer = IntelligentDataBalancer(config.undersampling_ratio, config.random_state)
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
+    input_dim = X_train.shape[1]
+    del X_train, y_train; gc.collect()  # free pre-balance arrays
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -117,8 +124,9 @@ def train_cnn_transformer(config: CNNTransformerConfig | None = None):
         val_batch_size=config.val_batch_size,
         num_workers=config.num_workers,
     )
+    del X_train_bal, y_train_bal; gc.collect()  # now in TensorDataset
     model = CNNTransformerIDS(
-        input_dim=X_train.shape[1],
+        input_dim=input_dim,
         d_model=config.d_model,
         conv_channels=config.conv_channels,
         num_layers=config.num_layers,

@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import copy
@@ -116,6 +117,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
     df = pd.read_csv(config.input_path)
     label_col = detect_label_column(df)
     X_raw, y, feature_cols = prepare_features(df, label_col)
+    del df; gc.collect()  # free ~1.7 GB
     val_ratio = getattr(config, "val_size", 0.1)
     test_ratio = config.test_size
     if val_ratio < 0 or test_ratio < 0:
@@ -125,6 +127,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
         raise ValueError("val_size + test_size must be < 1.0")
     feature_count = X_raw.shape[1]
     X_values = X_raw.values
+    del X_raw; gc.collect()
     if holdout_ratio > 0:
         X_train_raw, X_holdout, y_train, y_holdout = stratified_split(
             X_values,
@@ -152,6 +155,7 @@ def train_enhanced(config: EnhancedConfig | None = None):
         X_test_raw, y_test = X_holdout, y_holdout
         X_val_raw = np.empty((0, feature_count))
         y_val = np.empty(0, dtype=y_holdout.dtype)
+    del X_holdout, y_holdout, X_values, y; gc.collect()
     def _to_frame(array: np.ndarray) -> pd.DataFrame:
         return pd.DataFrame(array, columns=feature_cols) if array.size else pd.DataFrame(columns=feature_cols)
     X_train_raw = _to_frame(X_train_raw)
@@ -165,8 +169,11 @@ def train_enhanced(config: EnhancedConfig | None = None):
     X_train = preprocessor.fit_transform(X_train_raw, y_train)
     X_val = preprocessor.transform(X_val_raw) if len(X_val_raw) else np.empty((0, X_train.shape[1]))
     X_test = preprocessor.transform(X_test_raw) if len(X_test_raw) else np.empty((0, X_train.shape[1]))
+    del X_train_raw, X_val_raw, X_test_raw; gc.collect()
     balancer = IntelligentDataBalancer(config.undersampling_ratio, config.random_state)
     X_train_bal, y_train_bal = balancer.balance_classes(X_train, y_train)
+    input_dim = X_train.shape[1]
+    del X_train, y_train; gc.collect()
     train_loader, val_loader, _ = build_dataloaders(
         X_train_bal,
         y_train_bal,
@@ -186,13 +193,15 @@ def train_enhanced(config: EnhancedConfig | None = None):
             num_workers=config.num_workers,
             pin_memory=True,
         )
+    del X_train_bal, X_val, y_val, X_test, y_test; gc.collect()
     class_counts = np.bincount(y_train_bal, minlength=2)
     total = len(y_train_bal)
+    del y_train_bal; gc.collect()
     class_weights = torch.FloatTensor([
         total / (2 * max(class_counts[0], 1)),
         total / (2 * max(class_counts[1], 1)),
     ]).to(device)
-    model = _create_model(config, X_train.shape[1], device, multi_gpu)
+    model = _create_model(config, input_dim, device, multi_gpu)
     criterion = AdaptiveFocalLoss(
         alpha=config.focal_alpha,
         class_weights=class_weights if config.use_class_weights else None,

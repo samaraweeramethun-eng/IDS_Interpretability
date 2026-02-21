@@ -83,7 +83,7 @@ class RobustPreprocessor:
             self.scaler = RobustScaler()
         else:
             self.scaler = StandardScaler()
-        return self.scaler.fit_transform(X_proc)
+        return self.scaler.fit_transform(X_proc).astype(np.float32)
 
     def transform(self, X: pd.DataFrame) -> np.ndarray:
         X_proc = X.replace([np.inf, -np.inf], np.nan)
@@ -95,8 +95,8 @@ class RobustPreprocessor:
             X_proc = self.feature_selector.transform(X_proc)
             X_proc = pd.DataFrame(X_proc)
         if self.scaler is not None:
-            return self.scaler.transform(X_proc)
-        return X_proc.values
+            return self.scaler.transform(X_proc).astype(np.float32)
+        return X_proc.values.astype(np.float32)
 
 
 def detect_label_column(df: pd.DataFrame) -> str:
@@ -107,14 +107,16 @@ def detect_label_column(df: pd.DataFrame) -> str:
 
 
 def prepare_features(df: pd.DataFrame, label_col: str):
-    df = df.copy()
-    df["binary_label"] = (df[label_col] != "BENIGN").astype(int)
-    blacklist = {label_col, "binary_label", "Flow ID", "Source IP", "Destination IP", "Timestamp"}
+    binary_label = (df[label_col] != "BENIGN").astype(int).values
+    blacklist = {label_col, "Flow ID", "Source IP", "Destination IP", "Timestamp"}
     feature_cols = [col for col in df.columns if col not in blacklist]
     X = df[feature_cols].copy()
     for col in X.select_dtypes(include=["object"]).columns:
         X[col] = pd.to_numeric(X[col], errors="coerce")
-    return X, df["binary_label"].values, feature_cols
+    # Downcast float64 -> float32 to halve memory (saves ~850 MB on full dataset)
+    for col in X.select_dtypes(include=["float64"]).columns:
+        X[col] = X[col].astype(np.float32)
+    return X, binary_label, feature_cols
 
 
 def stratified_split(X: np.ndarray, y: np.ndarray, test_size: float, random_state: int):
